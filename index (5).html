@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>My Life Manager</title>
+<link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#1f3a34">
+<style>
+:root{--bg:#f2f4ef;--ink:#1f3a34;--tx:#1d2724;--mu:#66756f;--ln:#d5dcd5;--ac:#c98a00;--cd:#fff;--rd:#a3331f}
+@media(prefers-color-scheme:dark){:root{--bg:#141c19;--ink:#cfe3da;--tx:#e6eee9;--mu:#8da39a;--ln:#2c3a35;--ac:#e5a820;--cd:#1b2622;--rd:#e5765f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 Georgia,"Times New Roman",serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+button,input,select,textarea{font:inherit}main{max-width:760px;margin:0 auto;padding:12px 14px 80px}
+h1,h2,h3{font-weight:700;color:var(--ink);margin:.6em 0 .3em}h2{font-size:1.5rem}
+nav{position:sticky;top:0;z-index:5;background:var(--ink);display:flex;overflow-x:auto;gap:2px;padding:6px}
+nav button{background:none;border:0;color:#cfe3da;padding:8px 12px;border-radius:6px;white-space:nowrap;cursor:pointer}
+nav button.on{background:var(--ac);color:#1d1600;font-weight:700}
+.card,.item{background:var(--cd);border:1px solid var(--ln);border-radius:8px;padding:12px;margin:10px 0}
+.item{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:6px 0}
+form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}label{display:grid;gap:2px;font-size:.85rem;color:var(--mu)}
+input,select,textarea{padding:9px;border:1px solid var(--ln);border-radius:6px;background:var(--bg);color:var(--tx);width:100%}
+button{padding:9px 14px;border:0;border-radius:6px;background:var(--ink);color:var(--bg);cursor:pointer}
+button.g{background:none;border:1px solid var(--ln);color:var(--tx);padding:6px 10px}button.r{background:none;border:1px solid var(--rd);color:var(--rd);padding:6px 10px}
+.acts{display:flex;gap:6px;flex-shrink:0}.m{color:var(--mu)}.big{font-size:1.7rem;color:var(--ink);font-weight:700}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid var(--ln);text-align:left}
+td:last-child,th:last-child{text-align:right}#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;display:none;z-index:9;max-width:90%}
+.center{max-width:360px;margin:12vh auto;padding:0 16px}.center form{grid-template-columns:1fr}:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+</head><body><div id="app"></div><div id="toast" role="status"></div>
+<script>
+const SB=supabase.createClient('https://bqlcascgmkgtpdihksnq.supabase.co','sb_publishable_yG2I9WGBg_yjOXK-G6B8Wg_yY2wLWa5');
+const $=s=>document.querySelector(s),app=$('#app');
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const inr=n=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR'}).format(n||0);
+const ld=d=>new Date(d.getTime()-d.getTimezoneOffset()*6e4).toISOString().slice(0,10);
+const today=()=>ld(new Date());
+let U=null,pinRow=null,locked=true,view='dashboard',cur=today().slice(0,7),editing={},rows={},tmr=null,hiddenAt=0;
+const toast=m=>{const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',3500)};
+const range=m=>{const[y,mo]=m.split('-').map(Number);return[m+'-01',m+'-'+String(new Date(y,mo,0).getDate()).padStart(2,'0')]};
+const prev=m=>{const[y,mo]=m.split('-').map(Number);return ld(new Date(y,mo-2,1)).slice(0,7)};
+const Q=async(t,col,s,e)=>(await SB.from(t).select('*').gte(col,s).lte(col,e)).data||[];
+const sum=(a,f)=>a.reduce((t,r)=>t+Number(f(r)||0),0);
+const milkCharge=r=>r.status==='missed'?0:(+r.morning_litres+ +r.evening_litres)*r.rate_per_litre;
+const netSpend=a=>sum(a,r=>r.transaction_type==='expense'?r.amount:r.transaction_type==='refund'?-r.amount:0);
+
+/* ---------- PIN ---------- */
+const b64=u=>btoa(String.fromCharCode(...u)),unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+async function hashPin(pin,salt){const k=await crypto.subtle.importKey('raw',new TextEncoder().encode(pin),'PBKDF2',false,['deriveBits']);
+ return b64(new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt:unb64(salt),iterations:200000,hash:'SHA-256'},k,256)))}
+const fails=()=>JSON.parse(localStorage.getItem('lm_fail')||'{"n":0,"until":0}');
+function lockNow(){if(!U||!pinRow)return;locked=true;boot()}
+function bump(){clearTimeout(tmr);if(!locked&&pinRow)tmr=setTimeout(lockNow,(pinRow.lock_after_minutes||5)*6e4)}
+['click','keydown','touchstart'].forEach(e=>addEventListener(e,bump));
+document.addEventListener('visibilitychange',()=>{if(document.hidden)hiddenAt=Date.now();else if(!locked&&hiddenAt&&Date.now()-hiddenAt>30000)lockNow()});
+
+/* ---------- Auth screens ---------- */
+function authScreen(mode='in'){
+ app.innerHTML=`<div class=center><h1>My Life Manager</h1><p class=m>Your private space for documents, milk, expenses, bills and reminders.</p><div class=card><form onsubmit="event.preventDefault();doAuth('${mode}')">
+ ${mode==='up'?'<label>Your name<input id=nm autocomplete=name></label>':''}<label>Email<input id=em type=email autocomplete=email required></label>
+ ${mode==='forgot'?'':'<label>Password (min 8 characters)<input id=pw type=password minlength=8 autocomplete="'+(mode==='up'?'new':'current')+'-password" required></label>'}
+ <button>${{in:'Sign in',up:'Create account',forgot:'Send reset link'}[mode]}</button></form></div>
+ <p>${mode!=='in'?'<a href=# onclick="authScreen();return false">Sign in</a> · ':''}${mode!=='up'?'<a href=# onclick="authScreen(\'up\');return false">Create account</a> · ':''}${mode!=='forgot'?'<a href=# onclick="authScreen(\'forgot\');return false">Forgot password</a>':''}</p></div>`}
+async function doAuth(mode){const email=$('#em').value.trim(),pw=$('#pw')?.value;let r;const back=location.origin+location.pathname;
+ if(mode==='in')r=await SB.auth.signInWithPassword({email,password:pw});
+ else if(mode==='up'){r=await SB.auth.signUp({email,password:pw,options:{emailRedirectTo:back,data:{display_name:$('#nm').value.trim()||undefined}}});
+  if(!r.error&&!r.data.session)return toast('Check your email and click the verification link, then sign in.')}
+ else{r=await SB.auth.resetPasswordForEmail(email,{redirectTo:back});if(!r.error)return toast('If that email exists, a reset link has been sent.')}
+ if(r.error)toast(r.error.message)}
+function recovery(){app.innerHTML=`<div class=center><h1>Set a new password</h1><div class=card><form onsubmit="event.preventDefault();newPw()"><label>New password<input id=pw type=password minlength=8 required></label><button>Save password</button></form></div></div>`}
+async function newPw(){const{error}=await SB.auth.updateUser({password:$('#pw').value});if(error)return toast(error.message);toast('Password updated');boot()}
+
+function pinScreen(mode){const setup=mode==='set';
+ app.innerHTML=`<div class=center><h1>${setup?'Create your 4-digit PIN':'Enter PIN'}</h1><p class=m>${setup?'The PIN locks this app on your device. Your password still protects your account.':'Your data is locked.'}</p><div class=card><form onsubmit="event.preventDefault();${setup?'savePin()':'tryPin()'}">
+ <input id=pin type=password inputmode=numeric pattern="[0-9]{4}" maxlength=4 autocomplete=off required aria-label="PIN" style="font-size:1.6rem;text-align:center;letter-spacing:.5em">
+ ${setup?'<input id=pin2 type=password inputmode=numeric pattern="[0-9]{4}" maxlength=4 placeholder="Repeat PIN" required style="text-align:center">':''}<button>${setup?'Save PIN':'Unlock'}</button></form></div>
+ ${setup?'':'<p><a href=# onclick="resetPin();return false">Forgot PIN?</a> · <a href=# onclick="SB.auth.signOut();return false">Sign out</a></p>'}</div>`;$('#pin').focus()}
+async function savePin(){const p=$('#pin').value;if(!/^\d{4}$/.test(p))return toast('PIN must be 4 digits');if(p!==$('#pin2').value)return toast('PINs do not match');
+ const salt=b64(crypto.getRandomValues(new Uint8Array(16)));const row={user_id:U.id,pin_salt:salt,pin_hash:await hashPin(p,salt),lock_after_minutes:pinRow?.lock_after_minutes||5};
+ const{data,error}=await SB.from('user_pins').upsert(row,{onConflict:'user_id'}).select().single();if(error)return toast(error.message);pinRow=data;locked=false;localStorage.removeItem('lm_fail');boot()}
+async function tryPin(){const f=fails();if(Date.now()<f.until)return toast('Too many attempts. Try again in '+Math.ceil((f.until-Date.now())/1000)+' seconds.');
+ const ok=await hashPin($('#pin').value,pinRow.pin_salt)===pinRow.pin_hash;
+ if(ok){localStorage.removeItem('lm_fail');locked=false;boot()}else{const n=f.n+1;localStorage.setItem('lm_fail',JSON.stringify({n,until:n>=3?Date.now()+Math.min(2**(n-3)*30,3600)*1000:0}));toast('Wrong PIN');$('#pin').value=''}}
+function resetPin(){app.innerHTML=`<div class=center><h1>Reset PIN</h1><p class=m>Confirm your account password to create a new PIN.</p><div class=card><form onsubmit="event.preventDefault();doReset()"><label>Password<input id=pw type=password required autocomplete=current-password></label><button>Continue</button></form></div><p><a href=# onclick="boot();return false">Back</a></p></div>`}
+async function doReset(){const{error}=await SB.auth.signInWithPassword({email:U.email,password:$('#pw').value});if(error)return toast('Password incorrect');
+ await SB.from('user_pins').delete().eq('user_id',U.id);pinRow=null;localStorage.removeItem('lm_fail');boot()}
+
+async function boot(){
+ if(!U)return authScreen();
+ if(!pinRow){const{data}=await SB.from('user_pins').select('*').maybeSingle();pinRow=data||null}
+ if(!pinRow)return pinScreen('set');if(locked)return pinScreen('unlock');bump();render()}
+
+/* ---------- Generic modules ---------- */
+const DOC=['Aadhaar','PAN','Voter ID','Marksheet','Degree','Driving licence','Vehicle','Bank','Employment','Property','Medical','Other'];
+const EXP=['Grocery','Milk','Newspaper','Electricity','Water','Gas','Petrol','Transport','Credit card','Loan EMI','Mobile','Internet','Health','Shopping','Other'];
+const MODS={
+ documents:{t:'documents',title:'Documents',bucket:'personal-documents',meta:1,fileReq:1,f:[['title','Title','text',1],['category','Category','sel',1,DOC],['issue_date','Issue date','date'],['expiry_date','Expiry date','date'],['notes','Notes','text']],row:r=>`${r.title} — ${r.category}${r.expiry_date?', expires '+r.expiry_date:''}`},
+ milk:{t:'milk_entries',title:'Milk calendar',month:'entry_date',order:'entry_date',conflict:'user_id,entry_date',f:[['entry_date','Date','date',1,today],['morning_litres','Morning litres','num',1,()=>0],['evening_litres','Evening litres','num',1,()=>0],['rate_per_litre','Rate per litre','num',1],['status','Status','sel',1,['received','partial','missed']]],row:r=>`${r.entry_date}: morning ${r.morning_litres} L, evening ${r.evening_litres} L, ${r.status} — ${inr(milkCharge(r))}`},
+ milk_payments:{t:'milk_payments',title:'Supplier payments',month:'paid_at',order:'paid_at',f:[['period_start','For period starting','date',1,today],['amount','Amount','num',1],['paid_at','Paid on','date',1,today],['notes','Notes','text']],row:r=>`${r.paid_at}: ${inr(r.amount)} for ${r.period_start}`},
+ expenses:{t:'expenses',title:'Expenses',month:'expense_date',order:'expense_date',f:[['expense_date','Date','date',1,today],['category','Category','sel',1,EXP],['amount','Amount','num',1],['transaction_type','Type','sel',1,['expense','refund','transfer','card_repayment']],['payment_method','Paid via','sel',0,['','Cash','UPI','Debit card','Credit card','Bank']],['description','Description','text']],row:r=>`${r.expense_date}: ${inr(r.amount)} ${r.category} (${r.transaction_type}${r.payment_method?', '+r.payment_method:''}) ${r.description||''}`},
+ bills:{t:'bills',title:'Bills',bucket:'bill-attachments',order:'due_date',f:[['title','Bill name','text',1],['category','Category','sel',1,EXP],['bill_date','Bill date','date'],['due_date','Due date','date'],['amount_due','Amount due','num',1],['status','Status','sel',1,['unpaid','partial','paid','cancelled']]],row:r=>`${r.title||r.category}: ${inr(r.amount_due)}, due ${r.due_date||'—'} (${r.status})`},
+ contacts:{t:'contacts',title:'Birthdays',order:'birthday',f:[['name','Name','text',1],['birthday','Birthday','date'],['notes','Notes','text']],row:r=>`${r.name}${r.birthday?' — '+r.birthday:''} ${r.notes||''}`},
+ kids:{t:'kids',title:'My children',order:'name',asc:1,f:[['name','Child name','text',1],['class_name','Class','text'],['school','School','text']],row:r=>`${r.name}${r.class_name?' — class '+r.class_name:''}${r.school?', '+r.school:''}`},
+ kid_items:{t:'kid_items',title:'School reminders, timetable and events',order:'item_date',asc:1,f:[['kid_id','Child','kid',1],['kind','Type','sel',1,['homework','timetable','celebration','exam','fees','other']],['title','What','text',1],['item_date','Date','date'],['item_time','Time','time'],['day_of_week','Day (for timetable)','sel',0,['','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']],['notes','Notes','text'],['status','Status','sel',1,['active','done']]],row:r=>`${kn(r.kid_id)} · ${r.kind}${r.day_of_week?' · '+r.day_of_week:''}${r.item_date?' · '+r.item_date:''}${r.item_time?' '+r.item_time.slice(0,5):''} — ${r.title}${r.notes?' ('+r.notes+')':''} [${r.status}]`},
+ updates:{t:'updates',title:'Notes and updates',order:'event_date',f:[['title','Title','text',1],['event_date','Date','date',0,today],['content','Details','text']],row:r=>`${r.event_date||''} ${r.title}${r.content?': '+r.content:''}`},
+ reminders:{t:'reminders',title:'Reminders',order:'remind_at',asc:1,f:[['title','Reminder','text',1],['remind_at','When','dt',1],['repeat_rule','Repeat','sel',0,['','daily','weekly','monthly','yearly']],['status','Status','sel',1,['active','completed','cancelled']]],row:r=>`${new Date(r.remind_at).toLocaleString('en-IN')} — ${r.title}${r.repeat_rule?' (repeats '+r.repeat_rule+')':''} [${r.status}]`}};
+const kn=id=>rows.kids?.find(k=>k.id===id)?.name||'';
+const toLocal=v=>{const d=new Date(v);return new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,16)};
+function field([k,l,ty,req,o],v){const id='f_'+k;
+ if(ty==='kid')return`<label>${l} *<select id=${id}>${(rows.kids||[]).map(x=>`<option value="${x.id}" ${x.id===v?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label>`;
+ if(ty==='sel')return`<label>${l}<select id=${id}>${o.map(x=>`<option ${x===(v??(k==='status'?o[0]:''))?'selected':''}>${esc(x)}</option>`).join('')}</select></label>`;
+ const val=v!=null?(ty==='dt'?toLocal(v):v):(typeof o==='function'?o():'');
+ return`<label>${l}${req?' *':''}<input id=${id} type="${{date:'date',num:'number',dt:'datetime-local',time:'time'}[ty]||'text'}" ${ty==='num'?'step=any min=0':''} value="${esc(val)}"></label>`}
+async function rowsOf(c){let q=SB.from(c.t).select('*').order(c.order||'created_at',{ascending:!!c.asc});
+ if(c.month){const[s,e]=range(cur);q=q.gte(c.month,s).lte(c.month,e)}const{data,error}=await q;if(error)toast(error.message);return data||[]}
+const monthPick=()=>`<label style="max-width:200px">Month<input type=month value="${cur}" onchange="cur=this.value||cur;render()"></label>`;
+async function mod(m){const c=MODS[m],data=await rowsOf(c);rows[m]=data;const e=editing[m]||{};
+ return`<h2>${c.title}</h2>${m==='bills'?scanCard():''}${c.month&&m!=='milk_payments'?monthPick():''}<div class=card><form onsubmit="event.preventDefault();save('${m}')">${c.f.map(f=>field(f,e[f[0]])).join('')}
+ ${c.bucket?`<label>${c.fileReq?'File *':'Attachment'} (PDF, JPG or PNG, max 10 MB)<input type=file id=file accept=".pdf,.jpg,.jpeg,.png"></label>`:''}
+ <button>${e.id?'Save changes':'Add'}</button>${e.id?`<button type=button class=g onclick="editing['${m}']=null;render()">Cancel</button>`:''}</form></div>
+ <input placeholder="Search" aria-label="Search" oninput="flt(this.value)">${data.map(r=>`<div class=item data-s="${esc(c.row(r).toLowerCase())}"><div>${esc(c.row(r))}</div><div class=acts>${r.storage_path?`<button class=g onclick="openFile('${m}','${r.id}')">View</button><button class=g onclick="openFile('${m}','${r.id}',1)">Download</button>`:''}<button class=g onclick="edit('${m}','${r.id}')">Edit</button><button class=r onclick="del('${m}','${r.id}')">Delete</button></div></div>`).join('')||'<p class=m>Nothing here yet. Add your first entry above.</p>'}`}
+const flt=v=>document.querySelectorAll('.item').forEach(i=>i.style.display=i.dataset.s.includes(v.toLowerCase())?'':'none');
+const edit=(m,id)=>{editing[m]=rows[m].find(r=>r.id===id);render();scrollTo(0,0)};
+async function save(m){const c=MODS[m],row={};
+ for(const[k,l,ty,req]of c.f){let v=$('#f_'+k).value.trim();if(!v){if(req)return toast(l+' is required');v=null}else if(ty==='num')v=Number(v);else if(ty==='dt')v=new Date(v).toISOString();row[k]=v}
+ let file=$('#file')?.files[0];const old=editing[m];
+ if(c.bucket){if(!file&&!old&&c.fileReq)return toast('Please choose a file');
+  if(file){toast('Uploading…');try{const u=await putFile(c.bucket,file);file=u.file;row.storage_path=u.path;if(c.meta){row.file_name=file.name;row.mime_type=file.type;row.size_bytes=file.size}}catch(x){return toast(String(x))}}}
+ let r;if(old)r=await SB.from(c.t).update(row).eq('id',old.id);else{row.user_id=U.id;r=c.conflict?await SB.from(c.t).upsert(row,{onConflict:c.conflict}):await SB.from(c.t).insert(row)}
+ if(r.error){if(file)await SB.storage.from(c.bucket).remove([row.storage_path]);return toast(r.error.message)}
+ if(old&&file&&old.storage_path)await SB.storage.from(c.bucket).remove([old.storage_path]);editing[m]=null;toast('Saved');render()}
+async function del(m,id){if(!confirm('Delete this entry? This cannot be undone.'))return;const c=MODS[m],r=rows[m].find(x=>x.id===id);
+ const{error}=await SB.from(c.t).delete().eq('id',id);if(error)return toast(error.message);
+ if(r.storage_path)await SB.storage.from(c.bucket).remove([r.storage_path]);toast('Deleted');render()}
+async function openFile(m,id,dl){const c=MODS[m],r=rows[m].find(x=>x.id===id);const{data,error}=await SB.storage.from(c.bucket).createSignedUrl(r.storage_path,60,dl?{download:r.file_name||true}:undefined);if(error)return toast(error.message);
+ if(dl){const a=document.createElement('a');a.href=data.signedUrl;a.download='';document.body.appendChild(a);a.click();a.remove()}else open(data.signedUrl,'_blank','noopener')}
+async function shrink(f){if(!f.type.startsWith('image/')||(f.type==='image/png'&&f.size<2e6))return f;try{const b=await createImageBitmap(f),k=Math.min(1,1800/Math.max(b.width,b.height)),c=document.createElement('canvas');c.width=b.width*k;c.height=b.height*k;c.getContext('2d').drawImage(b,0,0,c.width,c.height);const bl=await new Promise(r=>c.toBlob(r,'image/jpeg',.82));return bl&&bl.size<f.size?new File([bl],f.name.replace(/\.\w+$/,'')+'.jpg',{type:'image/jpeg'}):f}catch{return f}}
+async function putFile(bucket,file){file=await shrink(file);if(!['application/pdf','image/jpeg','image/png'].includes(file.type)||file.size>10485760)throw'Only PDF, JPG or PNG files up to 10 MB are allowed';
+ const path=`${U.id}/${crypto.randomUUID()}.${file.name.split('.').pop().toLowerCase()}`;const{error}=await SB.storage.from(bucket).upload(path,file,{contentType:file.type});if(error)throw error.message;return{path,file}}
+const lbl='display:inline-block;font-size:1rem;border:1px solid var(--ln);padding:9px 14px;border-radius:6px;cursor:pointer;color:var(--tx)';
+const scanCard=()=>`<div class=card><b>Quick upload</b><p class=m>Take a photo of a bill or pick one from your phone. It is saved straight away as an unpaid bill; tap Edit to add the amount and due date.</p><div class=acts><label style="${lbl}">Take photo<input type=file accept="image/*" capture=environment hidden onchange="quickBill(this)"></label><label style="${lbl}">Choose photo or PDF<input type=file accept="image/*,.pdf" multiple hidden onchange="quickBill(this)"></label></div></div>`;
+async function quickBill(el){const fs=[...el.files];el.value='';let n=0;toast('Uploading…');
+ for(const f of fs){try{const u=await putFile('bill-attachments',f);const{error}=await SB.from('bills').insert({user_id:U.id,category:'Other',title:'Scanned bill '+today(),bill_date:today(),amount_due:0,status:'unpaid',storage_path:u.path});if(error){await SB.storage.from('bill-attachments').remove([u.path]);throw error.message}n++}catch(x){toast(String(x))}}
+ if(n){toast(n+' bill(s) uploaded. Tap Edit to add the amount and due date.');render()}}
+async function kidsView(){const a=await mod('kids');const b=rows.kids.length?await mod('kid_items'):'<p class=m>Add your child above first. Then you can add homework, timetable, school celebrations, exams and fee dates.</p>';return a+b}
+
+/* ---------- Views ---------- */
+async function milkView(){const a=await mod('milk'),b=await mod('milk_payments');const ch=sum(rows.milk,milkCharge),pd=sum(rows.milk_payments,r=>r.amount);
+ return a+`<div class=card><b>${cur} summary</b><div class=grid><div>Litres<div class=big>${sum(rows.milk,r=>r.status==='missed'?0:+r.morning_litres+ +r.evening_litres).toFixed(1)}</div></div><div>Charge<div class=big>${inr(ch)}</div></div><div>Paid<div class=big>${inr(pd)}</div></div><div>Balance<div class=big>${inr(ch-pd)}</div></div></div></div>`+b}
+async function dashboard(){const[s,e]=range(today().slice(0,7)),t=today(),in30=ld(new Date(Date.now()+30*864e5)),in60=ld(new Date(Date.now()+60*864e5)),in14=ld(new Date(Date.now()+14*864e5));
+ const[ex,milk,bills,con,docs,rem,ki,kids]=await Promise.all([Q('expenses','expense_date',s,e),Q('milk_entries','entry_date',s,e),SB.from('bills').select('*').in('status',['unpaid','partial']).order('due_date').then(r=>r.data||[]),SB.from('contacts').select('*').not('birthday','is',null).then(r=>r.data||[]),SB.from('documents').select('*').gte('expiry_date',t).lte('expiry_date',in60).order('expiry_date').then(r=>r.data||[]),SB.from('reminders').select('*').eq('status','active').gte('remind_at',new Date().toISOString()).order('remind_at').limit(5).then(r=>r.data||[]),SB.from('kid_items').select('*').eq('status','active').gte('item_date',t).lte('item_date',in14).order('item_date').limit(6).then(r=>r.data||[]),SB.from('kids').select('*').then(r=>r.data||[])]);
+ const tm=milk.find(r=>r.entry_date===t),bd=con.map(c=>{const[,mo,d]=c.birthday.split('-').map(Number);let n=new Date(new Date().getFullYear(),mo-1,d);if(ld(n)<t)n=new Date(n.getFullYear()+1,mo-1,d);return{c,n:ld(n)}}).filter(x=>x.n<=in30).sort((a,b)=>a.n<b.n?-1:1);
+ return`<h2>Dashboard</h2><div class=grid><div class=card>Spent this month<div class=big>${inr(netSpend(ex))}</div></div><div class=card>Bills outstanding<div class=big>${inr(sum(bills,r=>r.amount_due))}</div></div><div class=card>Milk this month<div class=big>${inr(sum(milk,milkCharge))}</div><span class=m>Today: ${tm?inr(milkCharge(tm)):'not recorded'}</span></div></div>
+ <div class=card><b>Upcoming reminders</b>${rem.map(r=>`<div>${new Date(r.remind_at).toLocaleString('en-IN')} — ${esc(r.title)}</div>`).join('')||'<div class=m>None</div>'}</div>
+ <div class=card><b>School: next 14 days</b>${ki.map(i=>`<div>${i.item_date} — ${esc(kids.find(k=>k.id===i.kid_id)?.name||'')}: ${esc(i.title)} (${i.kind})</div>`).join('')||'<div class=m>None</div>'}</div>
+ <div class=card><b>Birthdays in 30 days</b>${bd.map(x=>`<div>${x.n} — ${esc(x.c.name)}</div>`).join('')||'<div class=m>None</div>'}</div>
+ <div class=card><b>Documents expiring in 60 days</b>${docs.map(d=>`<div>${d.expiry_date} — ${esc(d.title)}</div>`).join('')||'<div class=m>None</div>'}</div>
+ <div class=card><b>Bills due</b>${bills.slice(0,5).map(b=>`<div>${b.due_date||'—'} — ${esc(b.title||b.category)} ${inr(b.amount_due)}</div>`).join('')||'<div class=m>None</div>'}</div>`}
+async function reports(){const[s,e]=range(cur),[ps,pe]=range(prev(cur));
+ const[ex,pex,bills,milk,pay]=await Promise.all([Q('expenses','expense_date',s,e),Q('expenses','expense_date',ps,pe),Q('bills','due_date',s,e),Q('milk_entries','entry_date',s,e),Q('milk_payments','paid_at',s,e)]);rows.rep=ex;
+ const cat={};ex.forEach(r=>{const v=r.transaction_type==='expense'?+r.amount:r.transaction_type==='refund'?-r.amount:0;if(v)cat[r.category]=(cat[r.category]||0)+v});
+ const T=netSpend(ex),P=netSpend(pex),ch=sum(milk,milkCharge),pd=sum(pay,r=>r.amount);
+ return`<h2>Reports</h2>${monthPick()}<div class=grid><div class=card>Total spend<div class=big>${inr(T)}</div><span class=m>Last month ${inr(P)} (${P?((T-P)/P*100).toFixed(0)+'%':'n/a'})</span></div><div class=card>Bills paid<div class=big>${inr(sum(bills.filter(b=>b.status==='paid'),r=>r.amount_due))}</div></div><div class=card>Bills unpaid<div class=big>${inr(sum(bills.filter(b=>['unpaid','partial'].includes(b.status)),r=>r.amount_due))}</div></div><div class=card>Milk balance<div class=big>${inr(ch-pd)}</div><span class=m>Charge ${inr(ch)}, paid ${inr(pd)}</span></div></div>
+ <div class=card><b>By category</b><table>${Object.entries(cat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${inr(v)}</td></tr>`).join('')||'<tr><td>No expenses</td><td></td></tr>'}</table><p class=m>Transfers and credit card repayments are not counted, so card spending is counted once, when you buy.</p><button onclick="csv()">Download CSV</button></div>`}
+function csv(){const h=['expense_date','category','amount','transaction_type','payment_method','description'];const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+ const t=[h.join(','),...rows.rep.map(r=>h.map(k=>q(r[k])).join(','))].join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'text/csv'}));a.download=`expenses-${cur}.csv`;a.click()}
+async function settings(){return`<h2>Settings</h2><div class=card><b>Account</b><p>${esc(U.email)}</p><form onsubmit="event.preventDefault();setLock()"><label>Lock after minutes of inactivity<input id=lk type=number min=1 max=120 value="${pinRow.lock_after_minutes}"></label><button>Save</button></form></div>
+ <div class=card><button class=g onclick="pinRow=null;SB.from('user_pins').delete().eq('user_id',U.id).then(boot)">Change PIN</button> <button class=g onclick="lockNow()">Lock now</button> <button class=g onclick="exportAll()">Download all my data</button> <button class=r onclick="wipe()">Delete all my data</button> <button onclick="SB.auth.signOut()">Sign out</button></div>
+ <p class=m>Currency is Indian rupees. To delete your sign-in account itself, contact the app owner after deleting your data.</p>`}
+async function setLock(){const n=Math.min(120,Math.max(1,+$('#lk').value||5));const{error}=await SB.from('user_pins').update({lock_after_minutes:n}).eq('user_id',U.id);if(error)return toast(error.message);pinRow.lock_after_minutes=n;toast('Saved')}
+const TABLES=['documents','milk_entries','milk_payments','expenses','bills','bill_payments','contacts','updates','reminders','kids','kid_items'];
+async function exportAll(){const o={};for(const t of TABLES)o[t]=(await SB.from(t).select('*')).data;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(o,null,2)],{type:'application/json'}));a.download='my-life-manager-data.json';a.click()}
+async function wipe(){if(prompt('This permanently deletes all your records and files. Type DELETE to confirm.')!=='DELETE')return;
+ for(const b of['personal-documents','bill-attachments']){const{data}=await SB.storage.from(b).list(U.id,{limit:1000});if(data?.length)await SB.storage.from(b).remove(data.map(f=>U.id+'/'+f.name))}
+ for(const t of['bill_payments','bills',...TABLES.filter(x=>x!=='bills'&&x!=='bill_payments')])await SB.from(t).delete().eq('user_id',U.id);toast('All your data was deleted');render()}
+
+const NAV=[['dashboard','Home'],['documents','Documents'],['milk','Milk'],['expenses','Expenses'],['bills','Bills'],['kids','Kids'],['contacts','Birthdays'],['updates','Notes'],['reminders','Reminders'],['reports','Reports'],['settings','Settings']];
+async function render(){if(!U||locked)return boot();
+ app.innerHTML=`<nav>${NAV.map(([k,l])=>`<button class="${k===view?'on':''}" onclick="view='${k}';render()">${l}</button>`).join('')}</nav><main>Loading…</main>`;
+ const html=await({dashboard,milk:milkView,reports,settings,kids:kidsView}[view]||(()=>mod(view)))();$('main').innerHTML=html}
+
+SB.auth.onAuthStateChange((ev,s)=>{U=s?.user||null;setTimeout(()=>{if(ev==='PASSWORD_RECOVERY')recovery();else if(ev==='SIGNED_OUT'){pinRow=null;locked=true;boot()}else if(ev==='INITIAL_SESSION'||ev==='SIGNED_IN'){if(ev==='SIGNED_IN'&&pinRow)return;boot()}})});
+</script></body></html>
